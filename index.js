@@ -1,42 +1,40 @@
 const WebSocket = require('ws');
-// Import HttpsProxyAgent correctly for newer versions
-const { HttpsProxyAgent } = require('https-proxy-agent');
 
-// List of proxies (format: 'http://ip:port')
-const proxies = [
-  'add ur proxies here',
-];
-
+// Hex strings for each message
 const messages = {
-  spawn: '020668696775797A00', // this spawns them in with the name higuyz
-  heartbeat: '01000000', // just a keep alive packet
-  connect: '00001a2b3c4d5e6f7aed68', // keep this the same it connects them
-  death: '0180ac0280ac0200', // don't do anything with this don't add it anywhere unless you want them to die and disconnect at a point
-  movement: '0180ac020000', // moves them to the right
-  custom: '051f626f6f6d666461206f72206869677579732062657374207363726970746572' // sends a message
+  spawn: '020668696775797A00', // Malformed spawn (9 bytes, "higuys" -> "higuyz")
+  heartbeat: '01000000', // 4 bytes
+  connect: '0000c39c5889c7b4aaed68', // 11 bytes
+  death: '0180ac0280ac0200', // 8 bytes
+  movement: '0180ac020000', // 6 bytes
+  custom: '051f626f6f6d666461206f72206869677579732062657374207363726970746572' // 38 bytes
 };
 
-const numConnections = 500;
+// Number of connections to establish (reduced for low-end systems)
+const numConnections = 50;
 const maxRetries = 3;
-const retryDelay = 1000;
+const retryDelay = 2000; // 2 seconds
+const connectionDelay = 100; // 100ms delay between connections
 
+// Keep process alive with a dummy interval
+setInterval(() => {}, 1000 * 60 * 60); // Run every hour
 
-setInterval(() => {}, 1000 * 60 * 60);
-function createConnection(proxyIndex = 0, retryCount = 0) {
-  const proxy = proxies[proxyIndex % proxies.length];
-  const agent = new HttpsProxyAgent(proxy);
-  const ws = new WebSocket('wss://gardn.pro/ws/', { agent });
+// Function to create a single WebSocket connection with retries
+function createConnection(retryCount = 0) {
+  const ws = new WebSocket('wss://gardn.pro/ws/');
   ws.binaryType = 'arraybuffer';
 
   let heartbeatInterval;
 
   ws.on('open', () => {
-    console.log(`Connected through proxy: ${proxy}`);
     if (ws.readyState === WebSocket.OPEN) {
-      sendBinaryMessage(ws, messages.connect);
       sendBinaryMessage(ws, messages.spawn);
+      sendBinaryMessage(ws, messages.connect);
+      sendBinaryMessage(ws, messages.death);
       sendBinaryMessage(ws, messages.movement);
     }
+
+    // Start periodic messages (every 800ms)
     heartbeatInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         sendBinaryMessage(ws, messages.heartbeat);
@@ -44,45 +42,32 @@ function createConnection(proxyIndex = 0, retryCount = 0) {
         sendBinaryMessage(ws, messages.custom);
       }
     }, 800);
+
+    ws.on('close', () => {
+      clearInterval(heartbeatInterval);
+      if (retryCount < maxRetries) {
+        setTimeout(() => createConnection(retryCount + 1), retryDelay + Math.random() * 100);
+      }
+    });
   });
 
-  ws.on('close', () => {
-    clearInterval(heartbeatInterval);
+  ws.on('error', () => {
     if (retryCount < maxRetries) {
-      console.log(`Retrying connection through proxy ${proxy} (Attempt ${retryCount + 1}/${maxRetries})`);
-      setTimeout(() => createConnection(proxyIndex, retryCount + 1), retryDelay);
-    }
-  });
-
-  ws.on('error', (error) => {
-    console.error(`WebSocket error with proxy ${proxy}: ${error.message}`);
-    if (retryCount < maxRetries) {
-      const nextProxyIndex = (proxyIndex + 1) % proxies.length;
-      setTimeout(() => createConnection(nextProxyIndex, retryCount + 1), retryDelay);
+      setTimeout(() => createConnection(retryCount + 1), retryDelay + Math.random() * 100);
     }
   });
 }
 
+// Helper function to convert hex string to ArrayBuffer
 function hexToArrayBuffer(hex) {
-  if (!hex || typeof hex !== 'string' || hex.length % 2 !== 0) {
+  try {
+    return Buffer.from(hex.replace(/[^0-9a-fA-F]/g, ''), 'hex');
+  } catch {
     return null;
   }
-  hex = hex.replace(/[^0-9a-fA-F]/g, '');
-  const bytes = [];
-  for (let i = 0; i < hex.length; i += 2) {
-    const byte = parseInt(hex.substr(i, 2), 16);
-    if (isNaN(byte)) {
-      return null;
-    }
-    bytes.push(byte);
-  }
-  const buffer = new ArrayBuffer(bytes.length);
-  const view = new Uint8Array(buffer);
-  view.set(bytes);
-  return buffer;
 }
 
-
+// Helper function to send binary message
 function sendBinaryMessage(ws, hex) {
   try {
     if (ws.readyState !== WebSocket.OPEN) {
@@ -92,23 +77,24 @@ function sendBinaryMessage(ws, hex) {
     if (buffer) {
       ws.send(buffer, { binary: true });
     }
-  } catch (error) {
-    console.error(`Error sending message: ${error.message}`);
+  } catch {
+    // Silently handle errors
   }
 }
 
-process.on('uncaughtException', (err) => {
-  console.error(`Uncaught Exception: ${err.message}`);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error(`Unhandled Rejection: ${reason}`);
-});
+// Handle uncaught errors to prevent process exit
+process.on('uncaughtException', () => {});
+process.on('unhandledRejection', () => {});
 
-for (let i = 0; i < numConnections; i++) {
-  createConnection(i);
-}
+// Create connections with delay
+(function connectAll(i = 0) {
+  if (i < numConnections) {
+    createConnection();
+    setTimeout(() => connectAll(i + 1), connectionDelay);
+  }
+})();
 
+// Handle SIGINT (Ctrl+C)
 process.on('SIGINT', () => {
-  console.log('Shutting down...');
   process.exit();
 });
